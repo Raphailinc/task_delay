@@ -3,26 +3,32 @@
 Для запуска проекта Django, включая установку зависимостей, выполните следующие шаги:
 
 1. Клонирование репозитория:
-git clone https://gitlab.com/velikiykeamil/service.git
-cd Work
+
+> git clone https://gitlab.com/velikiykeamil/service.git
+
+> cd Work
 
 2. Создание виртуальной среды:
-python -m myenv venv
+> python -m myenv venv
 
 3. Активация виртуальной среды:
+
 Для Windows:
-myenv\Scripts\activate
+> myenv\Scripts\activate
+
 Для Linux/Mac:
-source myenv/bin/activate
+> source myenv/bin/activate
 
 4. Установка зависимостей:
-pip install -r requirements.txt
+> pip install -r requirements.txt
 
 5. Применение миграций:
-python manage.py migrate
+> python manage.py migrate
 
 6. Запуск сервера:
-python manage.py runserver
+
+> python manage.py runserver
+
 После выполнения этих шагов сервер должен быть запущен на http://127.0.0.1:8000/.
 
 7. Перейдите к документации API:
