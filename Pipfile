@@ -31,9 +31,13 @@ wheel = "==0.41.3"
 celery = "*"
 django_celery_results = "*"
 django = "*"
+amqp = "*"
 
 [dev-packages]
 gunicorn = "*"
 
 [requires]
 python_version = "3.12"
+
+[pipenv]
+allow_prereleases = true

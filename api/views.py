@@ -1,7 +1,7 @@
 # api/views.py
 
 import logging
-from django.db.models import Count
+from django.db.models import Count, Q
 from django.utils import timezone
 from rest_framework import generics, status
 from rest_framework.decorators import action
@@ -14,6 +14,10 @@ from .services import send_message_to_external_service
 from django.urls import reverse
 from datetime import datetime, time
 from celery.result import AsyncResult
+from celery import shared_task
+from django.db import IntegrityError
+from .tasks import start_campaign_async
+from .utils import send_messages, check_campaign_status
 
 logger = logging.getLogger(__name__)
 
@@ -50,25 +54,34 @@ class CampaignListCreateView(generics.ListCreateAPIView):
     def perform_create(self, serializer):
         instance = serializer.save()
         try:
-            self.send_messages(instance)
+            if instance.is_active:
+                send_messages(instance)
+            elif instance.start_datetime <= timezone.now():
+                self.schedule_campaign_start(instance)
         except Exception as e:
             logger.error(f"Error while sending messages: {e}")
 
-    def send_messages(self, campaign):
-        if campaign.start_time <= timezone.now() <= campaign.end_time and campaign.is_within_time_interval():
-            clients = Client.objects.filter(tag=campaign.tag)
-            for client in clients:
-                message = Message.objects.create(campaign=campaign, client=client)
-                try:
-                    # Используем apply_async для асинхронной отправки
-                    result = self.send_message_async.apply_async(args=[message.id])
-                    task_id = result.id
-                    logger.info(f"Task ID for message {message.id}: {task_id}")
-                except Exception as e:
-                    # Логирование ошибки при неудачной отправке
-                    logger.error(f"Error sending message: {e}")
-                    message.status = 'FAILED'
-                    message.save()
+    @action(detail=True, methods=['post'])
+    def start(self, request, pk=None):
+        campaign = self.get_object()
+
+        # Проверить, выполняются ли задачи для этой рассылки
+        status = check_campaign_status(campaign.id)
+        if status in ['PENDING', 'STARTED']:
+            logger.info(f"Campaign {campaign.id} is already in progress.")
+            return Response({'status': 'Campaign is already in progress.'})
+        else:
+            campaign.is_active = True
+            campaign.save()
+            start_campaign_async.apply_async(args=[campaign.id])
+            return Response({'status': 'Campaign started successfully'})
+
+    def schedule_campaign_start(self, campaign):
+        try:
+            start_campaign_async.apply_async(args=[campaign.id])
+            logger.info(f"Scheduled campaign start for {campaign.id}")
+        except Exception as e:
+            logger.error(f"Error scheduling campaign start: {e}")
                     
     def handle_exception(self, exc):
         logger.error(f"Error in CampaignListCreateView: {exc}")
@@ -140,8 +153,8 @@ class CampaignStatsView(APIView):
                 # Получение общей статистики по рассылкам и количеству отправленных сообщений
                 stats = Newsletter.objects.annotate(
                     total_messages=Count('messages'),
-                    sent_messages=Count('messages', filter=Message.objects.filter(status='SENT')),
-                    failed_messages=Count('messages', filter=Message.objects.filter(status='FAILED'))
+                    sent_messages=Count('messages', filter=Q(messages__status='SENT')),
+                    failed_messages=Count('messages', filter=Q(messages__status='FAILED'))
                 ).values('id', 'total_messages', 'sent_messages', 'failed_messages')
             else:
                 # Получение статистики по конкретной рассылке
@@ -161,17 +174,21 @@ class CampaignStatsView(APIView):
     def start(self, request, *args, **kwargs):
         try:
             campaigns = Newsletter.objects.filter(
-                start_datetime__lte=datetime.now(),
-                end_datetime__gte=datetime.now()
+                start_datetime__lte=timezone.now(),
+                end_datetime__gte=timezone.now()
             )
 
             for campaign in campaigns:
-                self.send_messages(campaign)
+                # Вызываем задачу Celery вместо метода в представлении
+                start_campaign_async.apply_async(args=[campaign.id], eta=campaign.start_datetime)
 
             return Response({'message': 'Campaigns started successfully'})
         except Exception as e:
-            logger.error(f"Error in CampaignStartView: {e}")
+            logger.error(f"Error in CampaignStatsView: {e}")
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def post(self, request, *args, **kwargs):
+        return self.start(request, *args, **kwargs)
 
     def send_messages(self, campaign):
         logger.info(f"Processing send_messages for campaign {campaign.id}")
@@ -181,7 +198,7 @@ class CampaignStatsView(APIView):
                 message = Message.objects.create(campaign=campaign, client=client)
                 try:
                     # Используем apply_async для асинхронной отправки
-                    result = self.send_message_async.apply_async(args=[message.id])
+                    result = send_message_async.apply_async(args=[message.id])
                     task_id = result.id
                     logger.info(f"Task ID for message {message.id}: {task_id}")
                 except Exception as e:
@@ -189,6 +206,19 @@ class CampaignStatsView(APIView):
                     logger.error(f"Error sending message: {e}")
                     message.status = 'FAILED'
                     message.save()
+        else:
+            # Если рассылка с временем старта в будущем, запустить автоматически по наступлению времени
+            if campaign.start_datetime > timezone.now():
+                self.schedule_campaign_start(campaign)
+
+    def schedule_campaign_start(self, campaign):
+        try:
+            # Используем apply_async для асинхронного старта рассылки
+            result = start_campaign_async.apply_async(args=[campaign.id], eta=campaign.start_datetime)
+            task_id = result.id
+            logger.info(f"Task ID for starting campaign {campaign.id}: {task_id}")
+        except Exception as e:
+            logger.error(f"Error scheduling campaign start: {e}")
                     
     def handle_exception(self, exc):
         logger.error(f"Error in CampaignStartView: {exc}")
